@@ -9,16 +9,12 @@ import {
   FolderPlus,
   Trash2,
   Download,
-  Share2,
   LogOut,
   ChevronRight,
   HardDrive,
   Eye,
-  RefreshCw,
   Search,
-  ArrowUpDown
 } from 'lucide-react';
-import JSZip from 'jszip';
 
 interface FileItem {
   id: string;
@@ -51,24 +47,24 @@ export default function DrivePage() {
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'name' | 'date'>('date');
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   const [uploading, setUploading] = useState(false);
   const [storageUsed, setStorageUsed] = useState(0);
-  const [storageLimit] = useState(5 * 1024 * 1024 * 1024); // 5GB
+  const [storageLimit, setStorageLimit] = useState(5 * 1024 * 1024 * 1024); // 5GB default
 
-  // Modals & previews
   const [isNewFolderOpen, setIsNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewName, setPreviewName] = useState<string | null>(null);
 
+  // Fetch Items (Folders and Files)
   const fetchData = async () => {
     try {
-      const folderParam = currentFolderId ? `?folderId=${currentFolderId}` : '';
-      const searchParam = searchQuery ? `${folderParam ? '&' : '?'}search=${encodeURIComponent(searchQuery)}` : '';
-      const res = await fetch(`/api/drive${folderParam}${searchParam}`);
+      const folderParam = currentFolderId ? `folder_id=${currentFolderId}` : '';
+      const searchParam = searchQuery ? `search=${encodeURIComponent(searchQuery)}` : '';
+      const query = [folderParam, searchParam].filter(Boolean).join('&');
+      
+      const res = await fetch(`/api/items${query ? `?${query}` : ''}`);
 
       if (res.status === 401) {
         router.push('/login');
@@ -84,16 +80,20 @@ export default function DrivePage() {
         setBreadcrumbs(data.breadcrumbs);
       }
     } catch (err: any) {
-      console.error('Failed to load drive:', err);
+      console.error('Failed to load drive items:', err);
     }
   };
 
+  // Fetch Quota / Storage info
   const fetchStorage = async () => {
     try {
-      const res = await fetch('/api/drive/storage');
+      const res = await fetch('/api/storage/quota');
       if (res.ok) {
         const data = await res.json();
-        setStorageUsed(data.usedBytes || 0);
+        setStorageUsed(data.used_bytes || data.usedBytes || 0);
+        if (data.quota_bytes || data.quotaBytes) {
+          setStorageLimit(data.quota_bytes || data.quotaBytes);
+        }
       }
     } catch (err) {
       console.error('Storage fetch error:', err);
@@ -105,7 +105,35 @@ export default function DrivePage() {
     fetchStorage();
   }, [currentFolderId, searchQuery]);
 
-  // Handle File Upload (Signed URL Pattern)
+  // Create Folder: POST /api/items/folder
+  const handleCreateFolder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newFolderName.trim()) return;
+
+    try {
+      const res = await fetch('/api/items/folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newFolderName.trim(),
+          parent_id: currentFolderId,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `Error ${res.status}`);
+      }
+
+      setNewFolderName('');
+      setIsNewFolderOpen(false);
+      fetchData();
+    } catch (err: any) {
+      alert(err.message || 'Failed to create folder');
+    }
+  };
+
+  // File Upload: Signed URL flow
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (!fileList || fileList.length === 0) return;
@@ -115,17 +143,22 @@ export default function DrivePage() {
       for (let i = 0; i < fileList.length; i++) {
         const file = fileList[i];
 
-        // 1. Get Signed Upload URL from Backend
+        // 1. Get signed upload URL
         const initRes = await fetch('/api/files/upload-url', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fileName: file.name, folderId: currentFolderId }),
+          body: JSON.stringify({
+            fileName: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            sizeBytes: file.size,
+            folderId: currentFolderId,
+          }),
         });
 
-        if (!initRes.ok) throw new Error('Failed to get signed upload URL');
+        if (!initRes.ok) throw new Error(`Failed getting upload URL (${initRes.status})`);
         const { uploadUrl, path } = await initRes.json();
 
-        // 2. Direct upload file binary to Supabase
+        // 2. Direct upload to Supabase Storage
         const uploadRes = await fetch(uploadUrl, {
           method: 'PUT',
           headers: { 'Content-Type': file.type || 'application/octet-stream' },
@@ -134,7 +167,7 @@ export default function DrivePage() {
 
         if (!uploadRes.ok) throw new Error('Direct upload to storage failed');
 
-        // 3. Save file metadata in Postgres
+        // 3. Register file in DB
         await fetch('/api/files', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -158,33 +191,12 @@ export default function DrivePage() {
     }
   };
 
-  // Create New Folder
-  const handleCreateFolder = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newFolderName.trim()) return;
-
-    try {
-      const res = await fetch('/api/folders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newFolderName, parent_id: currentFolderId }),
-      });
-
-      if (!res.ok) throw new Error('Failed to create folder');
-      setNewFolderName('');
-      setIsNewFolderOpen(false);
-      fetchData();
-    } catch (err: any) {
-      alert(err.message);
-    }
-  };
-
-  // Delete File / Folder (Soft delete)
+  // Delete item: DELETE /api/items/:type/:id
   const handleDelete = async (type: 'folder' | 'file', id: string) => {
     if (!confirm(`Are you sure you want to move this ${type} to trash?`)) return;
     try {
       const res = await fetch(`/api/items/${type}/${id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Delete failed');
+      if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
       fetchData();
       fetchStorage();
     } catch (err: any) {
@@ -192,11 +204,11 @@ export default function DrivePage() {
     }
   };
 
-  // Preview File
+  // Preview & Download
   const handlePreview = async (fileId: string, fileName: string) => {
     try {
       const res = await fetch(`/api/files/${fileId}/url`);
-      if (!res.ok) throw new Error('Preview URL error');
+      if (!res.ok) throw new Error('Could not fetch file URL');
       const data = await res.json();
       setPreviewUrl(data.url);
       setPreviewName(fileName);
@@ -205,11 +217,10 @@ export default function DrivePage() {
     }
   };
 
-  // Download Single File
   const handleDownload = async (fileId: string, fileName: string) => {
     try {
       const res = await fetch(`/api/files/${fileId}/url`);
-      if (!res.ok) throw new Error('Failed to fetch download URL');
+      if (!res.ok) throw new Error('Failed to get download URL');
       const data = await res.json();
 
       const link = document.createElement('a');
@@ -231,7 +242,7 @@ export default function DrivePage() {
   };
 
   const formatSize = (bytes: number) => {
-    if (bytes === 0) return '0 B';
+    if (!bytes || bytes === 0) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -269,17 +280,17 @@ export default function DrivePage() {
           </nav>
         </div>
 
-        {/* Storage Bar */}
+        {/* Quota bar */}
         <div className="border-t border-slate-200 pt-4 space-y-3">
           <div className="space-y-1">
             <div className="flex justify-between text-xs text-slate-500">
               <span>Storage</span>
-              <span>{formatSize(storageUsed)} of 5 GB</span>
+              <span>{formatSize(storageUsed)} of {formatSize(storageLimit)}</span>
             </div>
             <div className="w-full bg-slate-100 rounded-full h-2">
               <div
-                className="bg-blue-600 h-2 rounded-full"
-                style={{ width: `${Math.min(100, (storageUsed / storageLimit) * 100)}%` }}
+                className="bg-blue-600 h-2 rounded-full transition-all"
+                style={{ width: `${Math.min(100, (storageUsed / (storageLimit || 1)) * 100)}%` }}
               />
             </div>
           </div>
@@ -294,9 +305,9 @@ export default function DrivePage() {
         </div>
       </aside>
 
-      {/* Main Content */}
+      {/* Main Content Area */}
       <main className="flex-1 flex flex-col overflow-hidden">
-        {/* Top Header */}
+        {/* Header */}
         <header className="h-16 border-b border-slate-200 bg-white flex items-center justify-between px-6">
           <div className="relative w-96">
             <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
@@ -335,9 +346,9 @@ export default function DrivePage() {
           </div>
         </header>
 
-        {/* Content Body */}
+        {/* Drive Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Breadcrumbs */}
+          {/* Breadcrumb Path */}
           {!searchQuery && (
             <div className="flex items-center gap-2 text-sm text-slate-600">
               {breadcrumbs.map((crumb, idx) => (
@@ -354,15 +365,15 @@ export default function DrivePage() {
             </div>
           )}
 
-          {/* Folders List */}
+          {/* Folders */}
           {folders.length > 0 && (
             <div>
               <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Folders</h2>
-              <div className="grid grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 {folders.map((folder) => (
                   <div
                     key={folder.id}
-                    onDoubleClick={() => setCurrentFolderId(folder.id)}
+                    onClick={() => setCurrentFolderId(folder.id)}
                     className="flex items-center justify-between p-3 bg-white border border-slate-200 rounded-lg shadow-sm hover:border-blue-400 cursor-pointer group"
                   >
                     <div className="flex items-center gap-3 overflow-hidden">
@@ -374,7 +385,7 @@ export default function DrivePage() {
                         e.stopPropagation();
                         handleDelete('folder', folder.id);
                       }}
-                      className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-500"
+                      className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-500 transition"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
@@ -384,7 +395,7 @@ export default function DrivePage() {
             </div>
           )}
 
-          {/* Files List */}
+          {/* Files Table */}
           <div>
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Files</h2>
             {files.length === 0 ? (
