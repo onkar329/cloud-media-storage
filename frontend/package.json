@@ -9,14 +9,16 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "next": "latest",
+    "next": "^15.1.7",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.475.0",
     "clsx": "^2.1.1",
     "tailwind-merge": "^3.0.1"
   },
   "devDependencies": {
+    "@types/jszip": "^3.4.1",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
