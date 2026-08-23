@@ -1,19 +1,33 @@
-import { Response, NextFunction } from 'express';
+import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { AuthedRequest, TokenUser } from '../types';
 
-export const auth = (req: AuthedRequest, res: Response, next: NextFunction) => {
-  const token = req.cookies?.access_token || req.headers.authorization?.replace('Bearer ', '');
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key-12345';
+
+export interface AuthRequest extends Request {
+  user?: {
+    id: string;
+    email: string;
+  };
+}
+
+export const authenticateToken = (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): void => {
+  const token = req.cookies?.token || req.headers.authorization?.split(' ')[1];
 
   if (!token) {
-    return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
+    res.status(401).json({ error: 'Authentication required' });
+    return;
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as TokenUser;
+    const decoded = jwt.verify(token, JWT_SECRET) as { id: string; email: string };
     req.user = decoded;
     next();
   } catch (err) {
-    return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token' } });
+    res.status(403).json({ error: 'Invalid or expired token' });
+    return;
   }
 };

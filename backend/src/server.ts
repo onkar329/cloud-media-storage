@@ -117,7 +117,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/auth/logout', (req: Request, res: Response) => {
+app.post('/api/auth/logout', (_req: Request, res: Response) => {
   res.clearCookie('token');
   return res.json({ message: 'Logged out successfully' });
 });
@@ -178,7 +178,6 @@ app.get('/api/drive', authenticateToken, async (req: AuthRequest, res: Response)
       fileQuery.order('created_at', { ascending: false }),
     ]);
 
-    // Build breadcrumbs if inside a folder
     const breadcrumbs: { id: string | null; name: string }[] = [{ id: null, name: 'My Drive' }];
     if (folderId) {
       let currentId: string | null = folderId;
@@ -224,7 +223,7 @@ app.get('/api/drive/storage', authenticateToken, async (req: AuthRequest, res: R
     if (error) throw error;
 
     const usedBytes = (files || []).reduce((acc, curr) => acc + (Number(curr.size_bytes) || 0), 0);
-    const totalBytes = 5 * 1024 * 1024 * 1024; // 5 GB limit
+    const totalBytes = 5 * 1024 * 1024 * 1024; // 5 GB default quota
 
     return res.json({ usedBytes, totalBytes });
   } catch (err: any) {
@@ -263,7 +262,7 @@ app.post('/api/folders', authenticateToken, async (req: AuthRequest, res: Respon
 // Direct upload URL initiation
 app.post('/api/files/upload-url', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const { fileName, folderId } = req.body;
+    const { fileName } = req.body;
     const userId = req.user?.id;
 
     if (!fileName) return res.status(400).json({ error: 'File name is required' });
@@ -287,7 +286,7 @@ app.post('/api/files/upload-url', authenticateToken, async (req: AuthRequest, re
   }
 });
 
-// Record uploaded file
+// Record uploaded file metadata
 app.post('/api/files', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { name, mime_type, size_bytes, storage_key, folder_id } = req.body;
@@ -353,7 +352,7 @@ app.get('/api/files/:id/url', authenticateToken, async (req: AuthRequest, res: R
   }
 });
 
-// Soft Delete
+// Soft delete
 app.delete('/api/items/:type/:id', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { type, id } = req.params;
@@ -441,7 +440,6 @@ app.delete('/api/trash/permanent', authenticateToken, async (req: AuthRequest, r
 app.post('/api/shares', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { file_id, email, role } = req.body;
-    const userId = req.user?.id;
 
     const { data: targetUser } = await supabase
       .from('users')
