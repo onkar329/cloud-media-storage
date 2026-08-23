@@ -43,28 +43,30 @@ export default function DrivePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
-  const [breadcrumbs, setBreadcrumbs] = useState<Breadcrumb[]>([{ id: null, name: 'Root' }]);
+  const [breadcrumbs, setBreadcrumbs] = useState<Breadcrumb[]>([{ id: null, name: 'My Drive' }]);
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
 
   const [uploading, setUploading] = useState(false);
   const [storageUsed, setStorageUsed] = useState(0);
-  const [storageLimit, setStorageLimit] = useState(5 * 1024 * 1024 * 1024); // 5GB default
+  const [storageLimit] = useState(5 * 1024 * 1024 * 1024); // 5GB default
 
   const [isNewFolderOpen, setIsNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewName, setPreviewName] = useState<string | null>(null);
 
-  // Fetch Items (Folders and Files)
+  // GET /api/drive?folderId=...&search=...
   const fetchData = async () => {
     try {
-      const folderParam = currentFolderId ? `folder_id=${currentFolderId}` : '';
+      const folderParam = currentFolderId ? `folderId=${currentFolderId}` : '';
       const searchParam = searchQuery ? `search=${encodeURIComponent(searchQuery)}` : '';
       const query = [folderParam, searchParam].filter(Boolean).join('&');
-      
-      const res = await fetch(`/api/items${query ? `?${query}` : ''}`);
+
+      const res = await fetch(`/api/drive${query ? `?${query}` : ''}`, {
+        credentials: 'include',
+      });
 
       if (res.status === 401) {
         router.push('/login');
@@ -84,16 +86,15 @@ export default function DrivePage() {
     }
   };
 
-  // Fetch Quota / Storage info
+  // GET /api/drive/storage
   const fetchStorage = async () => {
     try {
-      const res = await fetch('/api/storage/quota');
+      const res = await fetch('/api/drive/storage', {
+        credentials: 'include',
+      });
       if (res.ok) {
         const data = await res.json();
-        setStorageUsed(data.used_bytes || data.usedBytes || 0);
-        if (data.quota_bytes || data.quotaBytes) {
-          setStorageLimit(data.quota_bytes || data.quotaBytes);
-        }
+        setStorageUsed(data.usedBytes || 0);
       }
     } catch (err) {
       console.error('Storage fetch error:', err);
@@ -105,15 +106,16 @@ export default function DrivePage() {
     fetchStorage();
   }, [currentFolderId, searchQuery]);
 
-  // Create Folder: POST /api/items/folder
+  // POST /api/folders
   const handleCreateFolder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newFolderName.trim()) return;
 
     try {
-      const res = await fetch('/api/items/folder', {
+      const res = await fetch('/api/folders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           name: newFolderName.trim(),
           parent_id: currentFolderId,
@@ -133,7 +135,7 @@ export default function DrivePage() {
     }
   };
 
-  // File Upload: Signed URL flow
+  // Upload: Signed URL -> Direct Supabase PUT -> POST /api/files
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (!fileList || fileList.length === 0) return;
@@ -143,34 +145,36 @@ export default function DrivePage() {
       for (let i = 0; i < fileList.length; i++) {
         const file = fileList[i];
 
-        // 1. Get signed upload URL
+        // 1. Get Signed URL from Backend
         const initRes = await fetch('/api/files/upload-url', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({
             fileName: file.name,
-            mimeType: file.type || 'application/octet-stream',
-            sizeBytes: file.size,
-            folderId: currentFolderId,
           }),
         });
 
-        if (!initRes.ok) throw new Error(`Failed getting upload URL (${initRes.status})`);
+        if (!initRes.ok) {
+          const errData = await initRes.json().catch(() => ({}));
+          throw new Error(errData.error || `Failed getting upload URL (${initRes.status})`);
+        }
         const { uploadUrl, path } = await initRes.json();
 
-        // 2. Direct upload to Supabase Storage
+        // 2. Direct binary upload to Supabase Storage
         const uploadRes = await fetch(uploadUrl, {
           method: 'PUT',
           headers: { 'Content-Type': file.type || 'application/octet-stream' },
           body: file,
         });
 
-        if (!uploadRes.ok) throw new Error('Direct upload to storage failed');
+        if (!uploadRes.ok) throw new Error('Direct upload to Supabase failed');
 
-        // 3. Register file in DB
-        await fetch('/api/files', {
+        // 3. Register file metadata in Postgres
+        const saveRes = await fetch('/api/files', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({
             name: file.name,
             mime_type: file.type || 'application/octet-stream',
@@ -179,6 +183,8 @@ export default function DrivePage() {
             folder_id: currentFolderId,
           }),
         });
+
+        if (!saveRes.ok) throw new Error('Failed to register file record');
       }
 
       await fetchData();
@@ -191,11 +197,14 @@ export default function DrivePage() {
     }
   };
 
-  // Delete item: DELETE /api/items/:type/:id
+  // DELETE /api/items/:type/:id
   const handleDelete = async (type: 'folder' | 'file', id: string) => {
     if (!confirm(`Are you sure you want to move this ${type} to trash?`)) return;
     try {
-      const res = await fetch(`/api/items/${type}/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/items/${type}/${id}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
       if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
       fetchData();
       fetchStorage();
@@ -204,11 +213,13 @@ export default function DrivePage() {
     }
   };
 
-  // Preview & Download
+  // GET /api/files/:id/url (Preview)
   const handlePreview = async (fileId: string, fileName: string) => {
     try {
-      const res = await fetch(`/api/files/${fileId}/url`);
-      if (!res.ok) throw new Error('Could not fetch file URL');
+      const res = await fetch(`/api/files/${fileId}/url`, {
+        credentials: 'include',
+      });
+      if (!res.ok) throw new Error('Could not fetch file preview URL');
       const data = await res.json();
       setPreviewUrl(data.url);
       setPreviewName(fileName);
@@ -217,9 +228,12 @@ export default function DrivePage() {
     }
   };
 
+  // GET /api/files/:id/url (Download)
   const handleDownload = async (fileId: string, fileName: string) => {
     try {
-      const res = await fetch(`/api/files/${fileId}/url`);
+      const res = await fetch(`/api/files/${fileId}/url`, {
+        credentials: 'include',
+      });
       if (!res.ok) throw new Error('Failed to get download URL');
       const data = await res.json();
 
@@ -235,9 +249,11 @@ export default function DrivePage() {
     }
   };
 
-  // Logout
   const handleLogout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST' });
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'include',
+    });
     router.push('/login');
   };
 
@@ -280,7 +296,7 @@ export default function DrivePage() {
           </nav>
         </div>
 
-        {/* Quota bar */}
+        {/* Quota Bar */}
         <div className="border-t border-slate-200 pt-4 space-y-3">
           <div className="space-y-1">
             <div className="flex justify-between text-xs text-slate-500">
@@ -346,7 +362,7 @@ export default function DrivePage() {
           </div>
         </header>
 
-        {/* Drive Content */}
+        {/* Content Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {/* Breadcrumb Path */}
           {!searchQuery && (
