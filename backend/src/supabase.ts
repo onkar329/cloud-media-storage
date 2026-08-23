@@ -1,26 +1,19 @@
-import path from 'path';
-import dotenv from 'dotenv';
-import ws from 'ws';
 import { createClient } from '@supabase/supabase-js';
+import dotenv from 'dotenv';
+import WebSocket from 'ws';
 
-// Load .env explicitly
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+dotenv.config();
 
 const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error('Supabase URL or Key missing in .env');
-}
-
-export const supabase = createClient(supabaseUrl, supabaseKey, {
+export const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   auth: {
     persistSession: false,
     autoRefreshToken: false,
   },
+  // If realtime is explicitly passed, cast WebSocket to any:
   realtime: {
-    transport: ws,
+    WebSocket: WebSocket as any,
   },
 });
-
-export const BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'drive';
