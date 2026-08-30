@@ -147,6 +147,7 @@ app.get('/api/drive', authenticateToken, async (req: AuthRequest, res: Response)
     const userId = req.user?.id;
     const folderId = req.query.folderId ? String(req.query.folderId) : null;
     const search = req.query.search ? String(req.query.search).trim() : '';
+    const starredOnly = req.query.starred === 'true';
 
     let folderQuery = supabase
       .from('folders')
@@ -160,7 +161,10 @@ app.get('/api/drive', authenticateToken, async (req: AuthRequest, res: Response)
       .eq('owner_id', userId)
       .eq('is_deleted', false);
 
-    if (search) {
+    if (starredOnly) {
+      folderQuery = folderQuery.eq('is_starred', true);
+      fileQuery = fileQuery.eq('is_starred', true);
+    } else if (search) {
       folderQuery = folderQuery.ilike('name', `%${search}%`);
       fileQuery = fileQuery.ilike('name', `%${search}%`);
     } else {
@@ -178,8 +182,8 @@ app.get('/api/drive', authenticateToken, async (req: AuthRequest, res: Response)
       fileQuery.order('created_at', { ascending: false }),
     ]);
 
-    const breadcrumbs: { id: string | null; name: string }[] = [{ id: null, name: 'My Drive' }];
-    if (folderId) {
+    const breadcrumbs: { id: string | null; name: string }[] = [{ id: null, name: 'Storage Vault' }];
+    if (folderId && !starredOnly) {
       let currentId: string | null = folderId;
       const chain: { id: string; name: string }[] = [];
 
@@ -210,22 +214,48 @@ app.get('/api/drive', authenticateToken, async (req: AuthRequest, res: Response)
   }
 });
 
-// Storage usage calculation
+// Storage usage & breakdown calculation
 app.get('/api/drive/storage', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user?.id;
     const { data: files, error } = await supabase
       .from('files')
-      .select('size_bytes')
+      .select('size_bytes, mime_type')
       .eq('owner_id', userId)
       .eq('is_deleted', false);
 
     if (error) throw error;
 
-    const usedBytes = (files || []).reduce((acc, curr) => acc + (Number(curr.size_bytes) || 0), 0);
-    const totalBytes = 5 * 1024 * 1024 * 1024; // 5 GB default quota
+    let imagesBytes = 0;
+    let videosBytes = 0;
+    let audioBytes = 0;
+    let documentsBytes = 0;
+    let othersBytes = 0;
 
-    return res.json({ usedBytes, totalBytes });
+    const usedBytes = (files || []).reduce((acc, curr) => {
+      const size = Number(curr.size_bytes) || 0;
+      const mime = curr.mime_type || '';
+      if (mime.startsWith('image/')) imagesBytes += size;
+      else if (mime.startsWith('video/')) videosBytes += size;
+      else if (mime.startsWith('audio/')) audioBytes += size;
+      else if (mime.includes('pdf') || mime.includes('document') || mime.includes('text')) documentsBytes += size;
+      else othersBytes += size;
+      return acc + size;
+    }, 0);
+
+    const totalBytes = 5 * 1024 * 1024 * 1024; // 5 GB quota
+
+    return res.json({
+      usedBytes,
+      totalBytes,
+      breakdown: {
+        images: imagesBytes,
+        videos: videosBytes,
+        audio: audioBytes,
+        documents: documentsBytes,
+        others: othersBytes,
+      },
+    });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -310,6 +340,54 @@ app.post('/api/files', authenticateToken, async (req: AuthRequest, res: Response
 
     if (error) throw error;
     return res.status(201).json({ file });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Rename item
+app.patch('/api/items/:type/:id/rename', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const { type, id } = req.params;
+    const { name } = req.body;
+    const userId = req.user?.id;
+
+    if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
+
+    const table = type === 'folder' ? 'folders' : 'files';
+    const { data, error } = await supabase
+      .from(table)
+      .update({ name: name.trim() })
+      .eq('id', id)
+      .eq('owner_id', userId)
+      .select('*')
+      .single();
+
+    if (error) throw error;
+    return res.json({ item: data, message: 'Renamed successfully' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Toggle Star/Favorite
+app.patch('/api/items/:type/:id/star', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const { type, id } = req.params;
+    const { is_starred } = req.body;
+    const userId = req.user?.id;
+
+    const table = type === 'folder' ? 'folders' : 'files';
+    const { data, error } = await supabase
+      .from(table)
+      .update({ is_starred: Boolean(is_starred) })
+      .eq('id', id)
+      .eq('owner_id', userId)
+      .select('*')
+      .single();
+
+    if (error) throw error;
+    return res.json({ item: data, message: 'Star state updated' });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
