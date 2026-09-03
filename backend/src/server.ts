@@ -24,10 +24,10 @@ app.use(express.json());
 app.use(cookieParser());
 
 app.get('/', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', message: 'Cloud Media Storage API active' });
+  res.json({ status: 'ok', message: 'Cloud Media Storage API online' });
 });
 
-// ================= AUTH & PROFILE ROUTES =================
+// ================= AUTHENTICATION & PROFILE =================
 
 app.post('/api/auth/register', async (req: Request, res: Response) => {
   try {
@@ -43,7 +43,7 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
       .single();
 
     if (existingUser) {
-      return res.status(400).json({ error: 'User already exists' });
+      return res.status(400).json({ error: 'User already registered' });
     }
 
     const password_hash = await bcrypt.hash(password, 10);
@@ -86,12 +86,12 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       .single();
 
     if (error || !user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
 
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
@@ -150,7 +150,7 @@ app.put('/api/auth/profile', authenticateToken, async (req: AuthRequest, res: Re
 
     if (newPassword) {
       if (!currentPassword) {
-        return res.status(400).json({ error: 'Current password is required to set new password' });
+        return res.status(400).json({ error: 'Current password is required' });
       }
       const isMatch = await bcrypt.compare(currentPassword, user.password_hash);
       if (!isMatch) {
@@ -174,13 +174,13 @@ app.put('/api/auth/profile', authenticateToken, async (req: AuthRequest, res: Re
       .single();
 
     if (updateErr) throw updateErr;
-    return res.json({ message: 'Profile updated successfully', user: updatedUser });
+    return res.json({ message: 'Profile updated', user: updatedUser });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
 });
 
-// ================= DRIVE & STORAGE ROUTES =================
+// ================= DRIVE STORAGE, FILES & FOLDERS =================
 
 app.get('/api/drive', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -228,15 +228,15 @@ app.get('/api/drive', authenticateToken, async (req: AuthRequest, res: Response)
       const chain: { id: string; name: string }[] = [];
 
       while (currentId) {
-        const { data: currentFolder }: { data: any } = await supabase
+        const { data: curFolder }: { data: any } = await supabase
           .from('folders')
           .select('id, name, parent_id')
           .eq('id', currentId)
           .single();
 
-        if (currentFolder) {
-          chain.unshift({ id: currentFolder.id, name: currentFolder.name });
-          currentId = currentFolder.parent_id;
+        if (curFolder) {
+          chain.unshift({ id: curFolder.id, name: curFolder.name });
+          currentId = curFolder.parent_id;
         } else {
           break;
         }
@@ -244,7 +244,11 @@ app.get('/api/drive', authenticateToken, async (req: AuthRequest, res: Response)
       breadcrumbs.push(...chain);
     }
 
-    return res.json({ folders: folders || [], files: files || [], breadcrumbs });
+    return res.json({
+      folders: (folders || []).map(f => ({ ...f, is_starred: Boolean(f.is_starred) })),
+      files: (files || []).map(f => ({ ...f, is_starred: Boolean(f.is_starred) })),
+      breadcrumbs,
+    });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -297,7 +301,13 @@ app.post('/api/folders', authenticateToken, async (req: AuthRequest, res: Respon
 
     const { data: folder, error } = await supabase
       .from('folders')
-      .insert([{ name, parent_id: parent_id || null, owner_id: userId, is_deleted: false, is_starred: false }])
+      .insert([{
+        name,
+        parent_id: parent_id || null,
+        owner_id: userId,
+        is_deleted: false,
+        is_starred: false,
+      }])
       .select('*')
       .single();
 
@@ -344,7 +354,7 @@ app.post('/api/files', authenticateToken, async (req: AuthRequest, res: Response
       .insert([{
         name,
         mime_type: mime_type || 'application/octet-stream',
-        size_bytes,
+        size_bytes: Number(size_bytes) || 0,
         storage_key,
         folder_id: folder_id || null,
         owner_id: userId,
@@ -361,7 +371,6 @@ app.post('/api/files', authenticateToken, async (req: AuthRequest, res: Response
   }
 });
 
-// Monaco Raw File Content IO
 app.get('/api/files/:id/content', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
@@ -506,26 +515,32 @@ app.get('/api/files/:id/url', authenticateToken, async (req: AuthRequest, res: R
   }
 });
 
+// Soft Delete (Moves to Trash)
 app.delete('/api/items/:type/:id', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { type, id } = req.params;
     const userId = req.user?.id;
     const table = type === 'folder' ? 'folders' : 'files';
 
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from(table)
       .update({ is_deleted: true })
       .eq('id', id)
-      .eq('owner_id', userId);
+      .eq('owner_id', userId)
+      .select();
 
     if (error) throw error;
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'Item not found or unauthorized' });
+    }
+
     return res.json({ message: 'Item moved to trash' });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
 });
 
-// ================= SHARING ROUTES =================
+// ================= SHARING =================
 
 app.post('/api/files/:id/share-link', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
@@ -593,10 +608,23 @@ app.post('/api/shares', authenticateToken, async (req: AuthRequest, res: Respons
 app.get('/api/trash', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user?.id;
-    const [{ data: folders }, { data: files }] = await Promise.all([
-      supabase.from('folders').select('*').eq('owner_id', userId).eq('is_deleted', true).order('created_at', { ascending: false }),
-      supabase.from('files').select('*').eq('owner_id', userId).eq('is_deleted', true).order('created_at', { ascending: false }),
+    const [{ data: folders, error: fErr }, { data: files, error: fileErr }] = await Promise.all([
+      supabase
+        .from('folders')
+        .select('*')
+        .eq('owner_id', userId)
+        .eq('is_deleted', true)
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('files')
+        .select('*')
+        .eq('owner_id', userId)
+        .eq('is_deleted', true)
+        .order('created_at', { ascending: false }),
     ]);
+
+    if (fErr) throw fErr;
+    if (fileErr) throw fileErr;
 
     return res.json({ folders: folders || [], files: files || [] });
   } catch (err: any) {

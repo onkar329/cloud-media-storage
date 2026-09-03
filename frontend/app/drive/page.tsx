@@ -11,7 +11,6 @@ import {
   Upload,
   FolderPlus,
   Trash2,
-  Download,
   Share2,
   LogOut,
   ChevronRight,
@@ -36,11 +35,9 @@ import {
   Info,
   X,
   Database,
-  ExternalLink,
   Star,
   PieChart,
   Code2,
-  Clock,
   User,
   MessageCircle,
   Mail,
@@ -101,34 +98,43 @@ export default function DrivePage() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Appearance & Viewport
   const [darkMode, setDarkMode] = useState(false);
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('table');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  // Filters & Sorting
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<FilterCategory>('all');
   const [sortField, setSortField] = useState<SortField>('created_at');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
   const [isStarredView, setIsStarredView] = useState(false);
 
+  // Data State
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [breadcrumbs, setBreadcrumbs] = useState<Breadcrumb[]>([{ id: null, name: 'Storage Vault' }]);
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
 
+  // Selection & Details
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
   const [activeInspectorItem, setActiveInspectorItem] = useState<FileItem | null>(null);
 
+  // Storage
   const [storageUsed, setStorageUsed] = useState(0);
   const [storageLimit] = useState(5 * 1024 * 1024 * 1024);
   const [storageBreakdown, setStorageBreakdown] = useState({ images: 0, videos: 0, audio: 0, documents: 0, others: 0 });
   const [isAnalyticsOpen, setIsAnalyticsOpen] = useState(false);
 
+  // Progress & Dragging
   const [isDownloadingZip, setIsDownloadingZip] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [targetFolderId, setTargetFolderId] = useState<string | null>(null);
+  const dragCounter = useRef(0);
 
+  // Modals
   const [isNewFolderOpen, setIsNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [isNewFileModalOpen, setIsNewFileModalOpen] = useState(false);
@@ -139,7 +145,7 @@ export default function DrivePage() {
   const [renameValue, setRenameValue] = useState('');
   const [previewData, setPreviewData] = useState<{ url: string; name: string; mime: string } | null>(null);
 
-  // Unified Share Modal State
+  // Sharing
   const [shareModalData, setShareModalData] = useState<{
     isOpen: boolean;
     file: FileItem | null;
@@ -162,7 +168,7 @@ export default function DrivePage() {
     sharingCollab: false,
   });
 
-  // Monaco Editor State
+  // Monaco Editor
   const [editorData, setEditorData] = useState<{
     isOpen: boolean;
     fileId: string | null;
@@ -296,13 +302,15 @@ export default function DrivePage() {
     return result;
   }, [files, selectedCategory, sortField, sortOrder]);
 
-  const processUpload = async (fileList: FileList | File[]) => {
+  // Dual-mode Upload Engine (Handles FormData and Direct PUT fallbacks seamlessly)
+  const processUpload = async (fileList: FileList | File[], destinationFolderId: string | null = currentFolderId) => {
     if (!fileList || fileList.length === 0) return;
     setUploading(true);
     try {
-      for (let i = 0; i < fileList.length; i++) {
+      const total = fileList.length;
+      for (let i = 0; i < total; i++) {
         const file = fileList[i];
-        setUploadProgress(`Uploading ${file.name} (${i + 1}/${fileList.length})...`);
+        setUploadProgress(`Uploading ${file.name} (${i + 1}/${total})...`);
 
         const initRes = await fetch('/api/files/upload-url', {
           method: 'POST',
@@ -310,17 +318,46 @@ export default function DrivePage() {
           credentials: 'include',
           body: JSON.stringify({ fileName: file.name }),
         });
-        if (!initRes.ok) throw new Error('Signed upload URL error');
-        const { uploadUrl, path } = await initRes.json();
 
-        const uploadRes = await fetch(uploadUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': file.type || 'application/octet-stream' },
-          body: file,
-        });
-        if (!uploadRes.ok) throw new Error('Supabase bucket transmission failed');
+        if (!initRes.ok) {
+          const errData = await initRes.json();
+          throw new Error(errData.error || `Upload URL initialization failed for ${file.name}`);
+        }
 
-        await fetch('/api/files', {
+        const { uploadUrl, token, path } = await initRes.json();
+
+        // 1. Try Multipart upload with token
+        let uploadSuccess = false;
+        try {
+          const formData = new FormData();
+          formData.append('file', file);
+          const headers: Record<string, string> = {};
+          if (token) headers['Authorization'] = `Bearer ${token}`;
+
+          const uploadRes = await fetch(uploadUrl, {
+            method: 'POST',
+            headers,
+            body: formData,
+          });
+          if (uploadRes.ok) uploadSuccess = true;
+        } catch {
+          uploadSuccess = false;
+        }
+
+        // 2. Fallback to Direct Binary PUT
+        if (!uploadSuccess) {
+          const putRes = await fetch(uploadUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': file.type || 'application/octet-stream' },
+            body: file,
+          });
+          if (!putRes.ok) {
+            throw new Error(`Upload failed for ${file.name}`);
+          }
+        }
+
+        // 3. Persist record in Postgres
+        const regRes = await fetch('/api/files', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -329,11 +366,17 @@ export default function DrivePage() {
             mime_type: file.type || 'application/octet-stream',
             size_bytes: file.size,
             storage_key: path,
-            folder_id: currentFolderId,
+            folder_id: destinationFolderId,
           }),
         });
+
+        if (!regRes.ok) {
+          const regErr = await regRes.json();
+          throw new Error(regErr.error || 'Failed to save metadata');
+        }
       }
-      showToast('Assets uploaded securely');
+
+      showToast(`Uploaded ${total} ${total === 1 ? 'asset' : 'assets'} successfully`);
       await fetchData();
       await fetchStorage();
     } catch (err: any) {
@@ -366,7 +409,7 @@ export default function DrivePage() {
       } else {
         const res = await fetch(`/api/files/${file.id}/content`, { credentials: 'include' });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Failed to fetch contents');
+        if (!res.ok) throw new Error(data.error || 'Failed to load content');
 
         setEditorData({
           isOpen: true,
@@ -424,7 +467,7 @@ export default function DrivePage() {
           credentials: 'include',
           body: JSON.stringify({ content: editorData.content }),
         });
-        if (!res.ok) throw new Error('Failed to update content');
+        if (!res.ok) throw new Error('Failed to update file');
       }
 
       showToast('Document saved successfully');
@@ -462,7 +505,7 @@ export default function DrivePage() {
 
       setShareModalData((prev) => ({ ...prev, publicUrl: data.shareUrl, loading: false }));
     } catch (err: any) {
-      alert(err.message || 'Share link generation failed');
+      alert(err.message || 'Link generation failed');
       setShareModalData((prev) => ({ ...prev, loading: false }));
     }
   };
@@ -491,9 +534,9 @@ export default function DrivePage() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(downloadUrl);
-      showToast('ZIP bundle generated');
+      showToast('ZIP bundle downloaded');
     } catch (err: any) {
-      alert(err.message || 'Archive failure');
+      alert(err.message || 'ZIP failed');
     } finally {
       setIsDownloadingZip(false);
     }
@@ -501,14 +544,15 @@ export default function DrivePage() {
 
   const toggleStar = async (type: 'folder' | 'file', id: string, currentState: boolean = false) => {
     try {
-      await fetch(`/api/items/${type}/${id}/star`, {
+      const res = await fetch(`/api/items/${type}/${id}/star`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ is_starred: !currentState }),
       });
+      if (!res.ok) throw new Error('Star update failed');
       showToast(!currentState ? 'Pinned to Starred' : 'Removed from Starred');
-      fetchData();
+      await fetchData();
     } catch (err: any) {
       alert(err.message);
     }
@@ -516,11 +560,32 @@ export default function DrivePage() {
 
   const deleteItem = async (type: 'folder' | 'file', id: string) => {
     try {
-      await fetch(`/api/items/${type}/${id}`, { method: 'DELETE', credentials: 'include' });
+      const res = await fetch(`/api/items/${type}/${id}`, { method: 'DELETE', credentials: 'include' });
+      if (!res.ok) throw new Error('Delete failed');
       if (activeInspectorItem?.id === id) setActiveInspectorItem(null);
-      fetchData();
-      fetchStorage();
+      await fetchData();
+      await fetchStorage();
       showToast('Moved to Trash Bin');
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleRenameSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!renameTarget || !renameValue.trim()) return;
+    try {
+      const res = await fetch(`/api/items/${renameTarget.type}/${renameTarget.id}/rename`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ name: renameValue.trim() }),
+      });
+      if (!res.ok) throw new Error('Rename failed');
+      setRenameTarget(null);
+      setRenameValue('');
+      showToast('Renamed successfully');
+      fetchData();
     } catch (err: any) {
       alert(err.message);
     }
@@ -547,9 +612,38 @@ export default function DrivePage() {
 
   return (
     <div
-      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDragging(false); }}
-      onDrop={(e) => { e.preventDefault(); setIsDragging(false); if (e.dataTransfer.files) processUpload(e.dataTransfer.files); }}
+      onDragEnter={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter.current += 1;
+        if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+          setIsDragging(true);
+        }
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter.current -= 1;
+        if (dragCounter.current <= 0) {
+          setIsDragging(false);
+          setTargetFolderId(null);
+          dragCounter.current = 0;
+        }
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragging(false);
+        dragCounter.current = 0;
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+          processUpload(e.dataTransfer.files, targetFolderId || currentFolderId);
+          setTargetFolderId(null);
+        }
+      }}
       className={`flex h-screen font-sans antialiased transition-colors select-none ${darkMode ? 'bg-[#080B11] text-slate-100' : 'bg-[#F8FAFC] text-slate-900'}`}
     >
       {toastMessage && (
@@ -566,10 +660,16 @@ export default function DrivePage() {
         </div>
       )}
 
+      {/* Flicker-free Drag Overlay */}
       {isDragging && (
-        <div className="fixed inset-0 z-50 bg-blue-600/10 backdrop-blur-md border-2 border-dashed border-blue-500 flex flex-col items-center justify-center pointer-events-none">
-          <UploadCloud className="h-16 w-16 text-blue-600 dark:text-blue-400 animate-bounce mb-3" />
-          <h2 className="text-xl font-bold tracking-tight text-blue-700 dark:text-blue-300">Drop files anywhere to upload</h2>
+        <div className="fixed inset-0 z-50 bg-blue-600/15 backdrop-blur-sm border-4 border-dashed border-blue-500 flex flex-col items-center justify-center pointer-events-none transition-all">
+          <div className="bg-slate-900/90 text-white dark:bg-white/95 dark:text-slate-900 px-8 py-6 rounded-3xl shadow-2xl flex flex-col items-center gap-3 border border-blue-400/40">
+            <UploadCloud className="h-14 w-14 text-blue-500 animate-bounce" />
+            <h2 className="text-lg font-bold tracking-tight">
+              {targetFolderId ? 'Drop to upload inside folder' : 'Drop anywhere to upload to active directory'}
+            </h2>
+            <p className="text-xs text-slate-400">Direct streaming straight to Supabase Storage</p>
+          </div>
         </div>
       )}
 
@@ -588,7 +688,7 @@ export default function DrivePage() {
                 setSelectedFileIds([]);
                 fetchData();
                 fetchStorage();
-                showToast('Batch trash complete');
+                showToast('Batch move to trash complete');
               }
             }}
             className="flex items-center gap-1.5 text-xs font-semibold text-red-400 hover:text-red-300"
@@ -599,7 +699,7 @@ export default function DrivePage() {
         </div>
       )}
 
-      {/* Sidebar */}
+      {/* Sidebar Navigation */}
       <aside className={`w-64 border-r flex flex-col justify-between p-5 transition-colors shrink-0 ${darkMode ? 'bg-[#0D111A] border-slate-800/80' : 'bg-white border-slate-200/80'}`}>
         <div className="space-y-6">
           <div className="flex items-center justify-between px-2">
@@ -720,22 +820,52 @@ export default function DrivePage() {
             </div>
           </div>
 
-          {/* Folders */}
+          {/* Folders with Per-Folder Drop Zones */}
           {folders.length > 0 && selectedCategory === 'all' && (
             <div className="space-y-3">
               <h3 className={`text-[11px] font-bold uppercase tracking-wider ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>Folders</h3>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3.5">
                 {folders.map((folder) => (
-                  <div key={folder.id} onClick={() => setCurrentFolderId(folder.id)} className={`flex items-center justify-between p-3.5 border rounded-2xl cursor-pointer group ${darkMode ? 'bg-[#0D111A] border-slate-800' : 'bg-white border-slate-200'}`}>
+                  <div
+                    key={folder.id}
+                    onClick={() => setCurrentFolderId(folder.id)}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setTargetFolderId(folder.id);
+                    }}
+                    onDragLeave={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (targetFolderId === folder.id) setTargetFolderId(null);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setIsDragging(false);
+                      dragCounter.current = 0;
+                      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                        processUpload(e.dataTransfer.files, folder.id);
+                      }
+                      setTargetFolderId(null);
+                    }}
+                    className={`flex items-center justify-between p-3.5 border rounded-2xl cursor-pointer group transition ${
+                      targetFolderId === folder.id
+                        ? 'border-blue-500 bg-blue-500/10 ring-2 ring-blue-500/30'
+                        : darkMode
+                        ? 'bg-[#0D111A] border-slate-800 hover:border-slate-700'
+                        : 'bg-white border-slate-200 hover:border-blue-300'
+                    }`}
+                  >
                     <div className="flex items-center gap-2.5 overflow-hidden">
-                      <Folder className="h-4 w-4 text-amber-500 shrink-0" />
+                      <Folder className={`h-4 w-4 shrink-0 ${targetFolderId === folder.id ? 'text-blue-500' : 'text-amber-500'}`} />
                       <span className="text-xs font-semibold truncate">{folder.name}</span>
                     </div>
                     <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1">
                       <button onClick={(e) => { e.stopPropagation(); toggleStar('folder', folder.id, folder.is_starred); }} className="p-1 text-slate-400 hover:text-amber-500">
                         <Star className={`h-3 w-3 ${folder.is_starred ? 'text-amber-500 fill-amber-500' : ''}`} />
                       </button>
-                      <button onClick={(e) => { e.stopPropagation(); setRenameTarget({ type: 'folder', id: folder.id, name: folder.name }); setNewFolderName(folder.name); }} className="p-1 text-slate-400 hover:text-blue-500">
+                      <button onClick={(e) => { e.stopPropagation(); setRenameTarget({ type: 'folder', id: folder.id, name: folder.name }); setRenameValue(folder.name); }} className="p-1 text-slate-400 hover:text-blue-500">
                         <Edit3 className="h-3 w-3" />
                       </button>
                       <button onClick={(e) => { e.stopPropagation(); deleteItem('folder', folder.id); }} className="p-1 text-slate-400 hover:text-red-500">
@@ -748,7 +878,7 @@ export default function DrivePage() {
             </div>
           )}
 
-          {/* Files */}
+          {/* Files List */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <h3 className={`text-[11px] font-bold uppercase tracking-wider ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>Files ({processedFiles.length})</h3>
@@ -774,7 +904,7 @@ export default function DrivePage() {
             {processedFiles.length === 0 ? (
               <div className={`text-center py-20 border-2 border-dashed rounded-2xl ${darkMode ? 'bg-[#0D111A]/40 border-slate-800' : 'bg-white border-slate-200'}`}>
                 <UploadCloud className="h-10 w-10 text-slate-400 mx-auto mb-2 opacity-50" />
-                <p className="text-xs font-semibold text-slate-400">No assets detected</p>
+                <p className="text-xs font-semibold text-slate-400">No assets in this location</p>
               </div>
             ) : viewMode === 'table' ? (
               <div className={`border rounded-2xl overflow-hidden shadow-2xs ${darkMode ? 'bg-[#0D111A] border-slate-800/80' : 'bg-white border-slate-200/80'}`}>
@@ -808,11 +938,11 @@ export default function DrivePage() {
                           <td className="py-3 px-4 text-right" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center justify-end gap-1">
                               {editable && (
-                                <button onClick={() => handleOpenMonaco(file)} className="p-1.5 rounded-lg text-slate-400 hover:text-sky-500 hover:bg-slate-100 dark:hover:bg-slate-800" title="Edit">
+                                <button onClick={() => handleOpenMonaco(file)} className="p-1.5 rounded-lg text-slate-400 hover:text-sky-500 hover:bg-slate-100 dark:hover:bg-slate-800" title="Edit in Monaco">
                                   <Code2 className="h-3.5 w-3.5" />
                                 </button>
                               )}
-                              <button onClick={() => toggleStar('file', file.id, file.is_starred)} className="p-1.5 rounded-lg text-slate-400 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800">
+                              <button onClick={() => toggleStar('file', file.id, file.is_starred)} className="p-1.5 rounded-lg text-slate-400 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800" title="Star">
                                 <Star className={`h-3.5 w-3.5 ${file.is_starred ? 'text-amber-500 fill-amber-500' : ''}`} />
                               </button>
                               <button
@@ -822,16 +952,17 @@ export default function DrivePage() {
                                   setPreviewData({ url: data.url, name: file.name, mime: file.mime_type });
                                 }}
                                 className="p-1.5 rounded-lg text-slate-400 hover:text-blue-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                                title="Quick Look"
                               >
                                 <Eye className="h-3.5 w-3.5" />
                               </button>
-                              <button onClick={() => handleOpenShare(file)} className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-500 hover:bg-slate-100 dark:hover:bg-slate-800" title="Share">
+                              <button onClick={() => handleOpenShare(file)} className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-500 hover:bg-slate-100 dark:hover:bg-slate-800" title="Share via WhatsApp/Email/RBAC">
                                 <Share2 className="h-3.5 w-3.5" />
                               </button>
-                              <button onClick={() => { setRenameTarget({ type: 'file', id: file.id, name: file.name }); setNewFileNameInput(file.name); }} className="p-1.5 rounded-lg text-slate-400 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800">
+                              <button onClick={() => { setRenameTarget({ type: 'file', id: file.id, name: file.name }); setRenameValue(file.name); }} className="p-1.5 rounded-lg text-slate-400 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800" title="Rename">
                                 <Edit3 className="h-3.5 w-3.5" />
                               </button>
-                              <button onClick={() => deleteItem('file', file.id)} className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-slate-100 dark:hover:bg-slate-800">
+                              <button onClick={() => deleteItem('file', file.id)} className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-slate-100 dark:hover:bg-slate-800" title="Move to Trash">
                                 <Trash2 className="h-3.5 w-3.5" />
                               </button>
                             </div>
@@ -871,7 +1002,7 @@ export default function DrivePage() {
                           </button>
                         )}
                         <button onClick={() => handleOpenShare(file)} className="text-slate-400 hover:text-indigo-500"><Share2 className="h-3.5 w-3.5" /></button>
-                        <button onClick={() => { setRenameTarget({ type: 'file', id: file.id, name: file.name }); setNewFileNameInput(file.name); }} className="text-slate-400 hover:text-amber-500"><Edit3 className="h-3.5 w-3.5" /></button>
+                        <button onClick={() => { setRenameTarget({ type: 'file', id: file.id, name: file.name }); setRenameValue(file.name); }} className="text-slate-400 hover:text-amber-500"><Edit3 className="h-3.5 w-3.5" /></button>
                         <button onClick={() => deleteItem('file', file.id)} className="text-slate-400 hover:text-red-500"><Trash2 className="h-3.5 w-3.5" /></button>
                       </div>
                     </div>
@@ -1051,7 +1182,7 @@ export default function DrivePage() {
         </div>
       )}
 
-      {/* New File Template Selection Modal */}
+      {/* New File Modal */}
       {isNewFileModalOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
           <form onSubmit={(e) => {
@@ -1115,7 +1246,28 @@ export default function DrivePage() {
         </div>
       )}
 
-      {/* Storage Analytics Breakdown Modal */}
+      {/* Rename Modal */}
+      {renameTarget && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <form onSubmit={handleRenameSubmit} className={`rounded-2xl p-6 w-full max-w-sm space-y-4 shadow-2xl border ${darkMode ? 'bg-[#0D111A] border-slate-800 text-slate-100' : 'bg-white border-slate-100'}`}>
+            <h3 className="font-semibold text-sm">Rename {renameTarget.type === 'folder' ? 'Folder' : 'File'}</h3>
+            <input
+              type="text"
+              autoFocus
+              required
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              className={`w-full px-3.5 py-2 border rounded-xl text-xs ${darkMode ? 'bg-slate-950 border-slate-800' : 'bg-white border-slate-300'}`}
+            />
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => { setRenameTarget(null); setRenameValue(''); }} className="px-3.5 py-2 text-xs text-slate-400 hover:bg-slate-800 rounded-xl">Cancel</button>
+              <button type="submit" className="px-4 py-2 text-xs bg-blue-600 text-white font-semibold rounded-xl">Save</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Storage Breakdown */}
       {isAnalyticsOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
           <div className={`rounded-3xl p-6 w-full max-w-md space-y-5 shadow-2xl border ${darkMode ? 'bg-[#0D111A] border-slate-800 text-slate-100' : 'bg-white border-slate-100'}`}>
