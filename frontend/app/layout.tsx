@@ -2,7 +2,7 @@ import "./globals.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Cloud Media Storage",
+  title: "Welcome to Cloud Media Storage",
   description: "Secure cloud file storage and sharing"
 };
 
