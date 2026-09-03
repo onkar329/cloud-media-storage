@@ -4,7 +4,7 @@ export default function Home() {
   return (
     <main className="min-h-screen grid place-items-center p-8">
       <section className="max-w-xl text-center">
-        <h1 className="text-4xl font-bold mb-4">Cloud Media Storage</h1>
+        <h1 className="text-4xl font-bold mb-4">Welcome to Cloud Media Storage</h1>
         <p className="text-slate-600 mb-8">
           Secure file upload, folders, sharing, search and trash.
         </p>
